@@ -10,6 +10,8 @@ the notes of the version's GitHub Release.
 
 ## [Unreleased]
 
+## [0.1.1] - 2026-10-24
+
 ### Fixed
 
 - A periodic read is no longer put off by 1 s when its timer fires a hair
@@ -28,3 +30,6 @@ the notes of the version's GitHub Release.
   sent again while the mount still moves.
 - Optional PIN of the User level, sent only when the mount asks for it; a
   refused PIN is never tried again by itself.
+
+[Unreleased]: https://github.com/LM1LC3N7/gladys-motionmount/compare/v0.1.1...HEAD
+[0.1.1]: https://github.com/LM1LC3N7/gladys-motionmount/releases/tag/v0.1.1
