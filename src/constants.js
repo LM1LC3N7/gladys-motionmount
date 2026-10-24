@@ -103,6 +103,8 @@ export const TIMINGS = {
   floodWindow: 10 * SECOND,
   /** TCP keep-alive probes of an idle connection. */
   keepAlive: 30 * SECOND,
+  /** A timer may fire this much before its monotonic due time: still due. */
+  timerSlack: 20,
   /** The last connection time is written to /data at most this often. */
   attemptPersistEvery: MINUTE,
   /** Delays after a failed or lost connection (never sooner than the interval). */

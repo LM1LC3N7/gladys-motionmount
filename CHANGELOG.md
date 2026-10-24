@@ -10,6 +10,11 @@ the notes of the version's GitHub Release.
 
 ## [Unreleased]
 
+### Fixed
+
+- A periodic read is no longer put off by 1 s when its timer fires a hair
+  before its due time.
+
 ### Added
 
 - Vogel's MotionMount motorized TV mounts (Signature, TVM 7675 Pro) over their

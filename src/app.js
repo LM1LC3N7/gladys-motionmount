@@ -765,7 +765,10 @@ export class MotionMountApp {
       return;
     }
     try {
-      const now = this.now();
+      // One clock read for the decision. A timer may fire a hair before the
+      // monotonic time it aimed at (Node's timer clock is cached): within
+      // TIMINGS.timerSlack the read is due, never put off by the 1 s floor.
+      const now = this.now() + this.timings.timerSlack;
       if (this.alive(this.session)) {
         if (now >= this.refreshAt + this.interval) {
           await this.refresh(this.session, { trial });
