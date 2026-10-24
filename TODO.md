@@ -10,6 +10,15 @@ Handoff document: what is done, what was decided, what comes next.
       `allow_moves` with bounds, Stop (current position as target) outside
       every queue, follow-up reads, en/fr, docs, cover. Tested against a
       simulated MotionMount only.
+- [x] **Milestone 1 fixes — review r1** (2026-10-24): stop on a stale or busy
+      connection (reads 1.5 s, one retry on a new connection, a stop write
+      cut after 1 s, presses joined), only a plausible stop target, stop
+      re-sends after an unconfirmed stop and through failed re-sends, a failed
+      first read closes the connection, #4xx after the PIN is a refusal, Test
+      button spacing after a restart, no invalid address shown back, PIN held
+      after cuts still sent by a stop, refusal reasons, deadlines counted
+      from the arrival, stop waits for the start, getConfig retried,
+      identity of the stopped mount, dead /data identity removed, docs.
 - [ ] **Milestone 2 — real mount**: run against a real MotionMount (see "To
       check"); turn the answers into fixtures.
 - [ ] **Milestone 3 — more**: several mounts, a "go to position" (extension,
@@ -58,9 +67,20 @@ Handoff document: what is done, what was decided, what comes next.
   (one try). Checked 1.5 s later, sent again while `isMoving` is 1 (3 times at
   most), unless a move was written after it; a move cut on the wire forces one
   more stop. The stop guard is not kept in /data (a restart in those 5 s loses
-  the re-sends; the stop itself was answered).
-- **Stop and the PIN**: a PIN refused is not sent again by the stop (it would
-  fail again); the mount then refuses the stop (#401), said in the docs.
+  the re-sends; said in the docs).
+- **Stop target**: only a plausible position (integers within 0..100 and
+  -100..100, ±5 brought back to the bound); further, nothing written
+  ("position not understood"). `positionValue` throws out of range: never a
+  silent clamp.
+- **Stop on a stale connection**: each read 1.5 s at most; a read failing
+  before the line opens a new connection and tries once more within the
+  3.5 s; a request on the wire (a stop write included) is waited 1 s at most,
+  then cut. Presses while the stop line is not written join it.
+- **Stop and the PIN**: a PIN refused by the mount (status not authenticated
+  or a refusal code right after it) is not sent again by the stop (it would
+  fail again); the mount then refuses the stop (#401), said in the docs. A PIN
+  held after two cuts right after it (`kind: 'drops'`) is still sent by a
+  stop, once per press. A cut decided by the integration never counts.
 - **Moves**: one at a time (lane); fresh reads before each (error status, the
   preset active, its extension and turn); refused on an obstruction, motor,
   internal or TV width error (not on HDMI-CEC); bounds checked on the preset

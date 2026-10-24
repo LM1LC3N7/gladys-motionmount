@@ -139,6 +139,10 @@ export async function fakeMount(initial = {}) {
 
   function handle(socket, line) {
     lines.push(line);
+    if (socket.frozen) {
+      // A stale connection: open, but nothing answers on it any more.
+      return;
+    }
     const [key, value] = line.includes(' = ') ? line.split(' = ') : [line, undefined];
     const quirk = quirks.get(key);
     if (quirk) {
@@ -217,6 +221,12 @@ export async function fakeMount(initial = {}) {
       broadcast(`mount/extension/current = ${state.extension}`);
       broadcast(`mount/turn/current = ${state.turn}`);
       broadcast('mount/isMoving = 0');
+    },
+    /** The connections open now stop answering (a mount restarted, a cable cut); new ones answer. */
+    freeze() {
+      for (const socket of sockets) {
+        socket.frozen = true;
+      }
     },
     dropAll() {
       for (const socket of sockets) {

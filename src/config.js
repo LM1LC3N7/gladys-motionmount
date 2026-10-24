@@ -29,7 +29,9 @@ const IPV4 = /^(25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)(\.(25[0-5]|2[0-4]\d|1\d\d|[1-9]
  * optional port (23 by default). Credentials ("user:pass@host") are refused and
  * never shown; names in .local are refused (mDNS does not resolve in the
  * container).
- * @returns {{ address?: { host: string, port: number }, invalid?: string, credentials?: boolean, local?: boolean }}
+ * The text typed is never kept for display (it may be a secret pasted in the
+ * wrong field): an invalid entry only gives its length.
+ * @returns {{ address?: { host: string, port: number }, invalid?: number, credentials?: boolean, local?: boolean }}
  */
 export function parseHost(raw) {
   let text = String(raw ?? '').trim();
@@ -40,9 +42,9 @@ export function parseHost(raw) {
     return { credentials: true };
   }
   if (text.length > 260) {
-    return { invalid: `${text.slice(0, 40)}…` };
+    return { invalid: text.length };
   }
-  const shown = text.slice(0, 60);
+  const shown = text.length;
   text = text.replace(/^(?:tcp|telnet):\/\//i, '').replace(/\/.*$/, '');
   const match = /^([^:]+)(?::(\d{1,5}))?$/.exec(text.toLowerCase());
   if (!match) {
@@ -103,7 +105,7 @@ export function pinOf(value) {
 }
 
 /**
- * @returns {{ address?: { host: string, port: number }, key: string, invalid?: string,
+ * @returns {{ address?: { host: string, port: number }, key: string, invalid?: number,
  *   local: boolean, credentialsInHost: boolean, pin: string, pinInvalid: boolean,
  *   pollInterval: number, allowMoves: boolean, maxExtension: number, maxTurn: number,
  *   language: 'fr'|'en' }}

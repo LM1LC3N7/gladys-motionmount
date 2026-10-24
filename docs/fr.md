@@ -91,51 +91,94 @@ Vogel's ; la liste suit leurs noms à chaque lecture.
 
 **Aller à un préréglage** : juste avant d'agir, l'intégration relit sur le
 support ses erreurs et le préréglage demandé (défini ? dans les bornes ?), puis
-envoie la commande. Elle est refusée, sans rien envoyer, quand :
+envoie la commande. Un déplacement à la fois : le suivant attend que le
+précédent soit envoyé. La commande est refusée, **sans rien envoyer**, quand :
 
+- la valeur n'est pas un préréglage de 0 à 7, ou aucune adresse n'est
+  configurée ;
 - l'option des déplacements est désactivée (vérifié à l'arrivée, après les
   lectures et juste avant l'envoi) ;
-- le support n'est pas connecté, ou son identité (adresse MAC) n'est pas celle
-  de l'appareil (une autre adresse IP lui a été donnée) ;
+- le support n'est pas connecté (ou sa lecture initiale n'est pas finie), ou
+  son identité (adresse MAC) n'est pas celle de l'appareil ;
 - le support demande un code PIN absent, refusé, ou impose une attente après
-  des essais manqués ;
-- le préréglage n'est pas défini, ou sort des bornes ;
-- le support signale une erreur (obstacle, moteur, interne, largeur) ;
-- un arrêt est arrivé entre-temps ;
+  des essais manqués, ou la connexion a été coupée deux fois de suite juste
+  après l'envoi du code ;
 - le déplacement précédent est parti sans confirmation il y a moins de 30 s
   et le support n'est pas encore arrivé ;
-- la commande n'a pas pu partir dans les 3,5 s.
+- le support n'a pas pu être lu avant d'agir (pas de réponse, connexion
+  perdue, valeur illisible) ;
+- le préréglage n'est pas défini, ou sort des bornes ;
+- le support signale une erreur (obstacle, moteur, interne, largeur) ;
+- un arrêt est arrivé entre-temps, ou la configuration a changé entre-temps ;
+- la connexion a été perdue avant l'envoi, ou la commande n'a pas pu partir
+  dans les 3,5 s.
 
-Un déplacement à la fois : le suivant attend que le précédent soit envoyé.
-Une commande partie sans réponse du support est annoncée « envoyée, sans
-confirmation », jamais renvoyée d'elle-même.
+Une fois la commande écrite :
+
+- le support peut la **refuser** lui-même (`#4xx`) : rien n'est fait, le refus
+  est annoncé ;
+- sans réponse du support, elle est annoncée « envoyée, sans confirmation »,
+  jamais renvoyée d'elle-même.
 
 **Arrêter** : le protocole du MotionMount n'a pas de commande d'arrêt.
 L'intégration lit la position actuelle et la renvoie comme nouvelle cible : les
-moteurs s'arrêtent là où ils sont (à l'arrondi près). L'arrêt annule les
-déplacements pas encore envoyés, passe devant toutes les autres demandes, et
-n'attend qu'au plus 1 s la demande en cours (sinon la connexion est coupée et
-rouverte). Si le support n'est pas connecté, l'arrêt ouvre aussitôt une
-connexion (un essai), même pendant l'attente après un échec. 1,5 s après, si le
-support dit encore bouger, l'arrêt est renvoyé (3 fois au plus), sauf si un
-déplacement a été envoyé après lui. Cas où l'arrêt échoue :
+moteurs s'arrêtent là où ils sont. Une position lue jusqu'à 5 points hors de la
+course (jeu mécanique) est ramenée à la borne ; au-delà, rien n'est écrit.
 
-- aucune adresse n'est configurée, ou le support ne répond pas (pas de
-  connexion dans le délai) ;
-- la position actuelle ne peut pas être lue ;
-- le support demande un code PIN qui n'est pas saisi, ou qui a déjà été refusé
-  (il n'est pas renvoyé), ou impose une attente : le support refuse alors
-  l'arrêt ;
-- l'arrêt n'a pas pu partir dans les 3,5 s.
+- L'arrêt ne dépend pas de l'option des déplacements et annule les
+  déplacements pas encore envoyés.
+- Il passe devant les autres demandes pas encore envoyées, et n'attend qu'au
+  plus 1 s la demande en cours, un arrêt précédent compris (sinon la connexion
+  est coupée et rouverte).
+- Chaque lecture de l'arrêt attend 1,5 s au plus ; si une lecture échoue avant
+  l'envoi (connexion figée ou coupée), une nouvelle connexion est ouverte et
+  l'arrêt réessayé une fois, dans le délai.
+- Si le support n'est pas connecté, l'arrêt ouvre aussitôt une connexion, même
+  pendant l'attente après un échec.
+- Plusieurs appuis pendant qu'un arrêt n'est pas encore envoyé partagent cet
+  arrêt.
+- Au démarrage du conteneur, l'arrêt attend la configuration (2 s au plus).
+- Si un code PIN est saisi et que le support le demande, l'arrêt l'envoie ; un
+  code refusé par le support n'est pas renvoyé, mais un code retenu à cause de
+  deux coupures l'est (une fois par appui).
+
+1,5 s après un arrêt (acquitté, ou envoyé sans réponse), l'intégration relit le
+mouvement du support (en rouvrant une connexion s'il le faut). S'il bouge
+encore, ou s'il ne peut pas le dire, l'arrêt est renvoyé, et ainsi de suite,
+3 fois au plus ; un renvoi qui échoue n'interrompt pas ces tours. Ces renvois
+s'arrêtent quand un déplacement a été envoyé après l'arrêt, ou quand la
+configuration change. Ils ne sont pas gardés dans `/data` : un redémarrage du
+conteneur dans les secondes qui suivent l'arrêt les perd.
+
+Cas où l'arrêt échoue :
+
+- aucune adresse n'est configurée (après l'attente du démarrage) ;
+- le support ne répond pas : pas de connexion, ou lectures sans réponse sur la
+  connexion d'origine puis sur la nouvelle ;
+- la position actuelle est illisible, ou n'est pas comprise (trop loin hors de
+  la course) : rien n'est écrit ;
+- le support refuse l'arrêt ou une lecture (`#401` : code PIN absent, refusé
+  ou attente imposée ; `#400`, `#403`, `#405`...) ;
+- l'arrêt n'a pas pu partir dans les 3,5 s ;
+- il est écrit sans réponse : « envoyé, sans confirmation » (puis vérifié
+  comme ci-dessus) ;
+- il est parti vers un autre MotionMount que celui de l'appareil (une autre
+  adresse MAC répond à l'adresse) : envoyé, mais signalé, car le support de
+  l'appareil n'est peut-être pas arrêté.
 
 ## Confidentialité et sécurité
 
-- Le code PIN n'apparaît jamais dans les journaux, l'état de connexion ni dans
-  `/data`. Quand le support le refuse, seule une **marque de 8 bits** (une
-  empreinte tronquée et salée, partagée par environ 39 codes sur 9999) est
-  gardée dans `/data`, pour savoir que le code saisi a changé : le refus est
-  définitif jusqu'à un autre code ou un clic sur **Tester la connexion** (un
-  essai).
+- Le code PIN n'est écrit ni dans les journaux, ni dans l'état de connexion,
+  ni dans `/data`. Une adresse saisie que l'intégration ne comprend pas n'est
+  pas réaffichée non plus (seulement sa longueur) : un code collé dans le
+  mauvais champ ne ressort pas.
+- Quand le support refuse le code (ou que la connexion est coupée deux fois de
+  suite juste après son envoi), seule une **marque de 8 bits** (une empreinte
+  tronquée et salée, partagée par environ 39 codes sur 9999) est gardée dans
+  `/data`, pour savoir que le code saisi a changé. Le code n'est plus envoyé de
+  lui-même jusqu'à un autre code ou un clic sur **Tester la connexion** (un
+  essai) ; seul l'arrêt l'envoie encore, une fois par appui, quand le blocage
+  vient de coupures.
 - Le protocole du MotionMount circule en clair sur votre réseau local.
 - Aucun cloud, aucun compte, aucun Bluetooth.
 
@@ -143,7 +186,10 @@ déplacement a été envoyé après lui. Cas où l'arrêt échoue :
 
 - **Injoignable** : vérifiez l'adresse IP et le câble Ethernet ; le support
   répond sur le port 23. Après un échec, l'intégration réessaie après 30 s, 1,
-  2 puis 5 min, jamais plus vite que l'intervalle.
+  2 puis 5 min, et au moins l'intervalle (le bouton **Tester la connexion**
+  aussi, redémarrage compris : l'heure de la dernière tentative est gardée dans
+  `/data`). Exceptions : un arrêt et ses vérifications, et les relectures qui
+  suivent une commande, peuvent rouvrir une connexion plus tôt.
 - **Identité illisible** : micrologiciel trop ancien (pas d'adresse MAC) ;
   mettez le support à jour avec l'application Vogel's.
 - **Préréglage non atteint** (pastille orange) : un obstacle, une main sur le

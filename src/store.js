@@ -4,13 +4,13 @@
 // loops on a refused PIN:
 //   - `lastAttemptAt`: when the mount was last connected to (written at most
 //     once a minute: src/app.js waits that minute more after a restart);
-//   - `identity`: the identity (MAC) of the mount last read at the address,
-//     and when (the status after a restart);
-//   - `pinBlock`: the mount REFUSED the PIN at that address: final, never
-//     tried again by itself; another PIN lifts it (even typed while the
-//     container was stopped), the Test button tries once and lifts it on a
-//     success. `pinDrops`: the connection dropped right after the PIN was
-//     sent (counted: the second time in a row is a refusal).
+//   - `pinBlock`: the PIN at that address is held: `kind` 'refused' (the
+//     mount said so: a status not authenticated, or a refusal code, right
+//     after the PIN) or 'drops' (the connection dropped right after the PIN,
+//     twice in a row). Never tried again by itself (a stop still sends it,
+//     once per press, after drops only); another PIN lifts it (even typed
+//     while the container was stopped), the Test button tries once and lifts
+//     it on a success. `pinDrops`: the drops counted so far.
 // NO SECRET: no PIN. A PIN has 9999 values, so even a salted hash of it would
 // be found back by trying them all: only 8 bits of a salted hash are kept (one
 // in 256 PINs shares them; about 39 of the 9999 do), enough to see that the
@@ -80,7 +80,6 @@ const mark = (value) =>
  */
 export function normalizeMemory(raw, now) {
   const data = object(raw);
-  const identity = object(data.identity);
   const block = object(data.pinBlock);
   const drops = object(data.pinDrops);
   return {
@@ -92,22 +91,14 @@ export function normalizeMemory(raw, now) {
       Math.max(0, Number.isFinite(data.lastAttemptAt) ? data.lastAttemptAt : 0),
       now,
     ),
-    identity:
-      address(identity.address) &&
-      typeof identity.id === 'string' &&
-      /^[0-9a-f]{12}$/.test(identity.id)
-        ? {
-            address: identity.address,
-            id: identity.id,
-            readAt:
-              Number.isFinite(identity.readAt) && identity.readAt > 0
-                ? Math.min(identity.readAt, now)
-                : 0,
-          }
-        : undefined,
     pinBlock:
       address(block.address) && mark(block.mark)
-        ? { address: block.address, mark: block.mark, failures: count(block.failures, 100) }
+        ? {
+            address: block.address,
+            mark: block.mark,
+            kind: block.kind === 'drops' ? 'drops' : 'refused',
+            failures: count(block.failures, 100),
+          }
         : undefined,
     pinDrops:
       address(drops.address) && mark(drops.mark)

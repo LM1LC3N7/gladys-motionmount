@@ -69,6 +69,8 @@ export function reasonOf(err) {
       return { en: 'too many lines from the mount', fr: 'trop de lignes reçues du support' };
     case 'invalid':
       return { en: 'answer not understood', fr: 'réponse non comprise' };
+    case 'late':
+      return { en: 'its turn came too late', fr: 'son tour est venu trop tard' };
     case 'busy':
       return { en: 'too many requests waiting', fr: 'trop de demandes en attente' };
     case 'refused': {
@@ -155,6 +157,11 @@ function pinLine(state) {
         en: 'The PIN was refused by the mount. Check it, then save the configuration or press "Test the connection". Not tried again until then.',
         fr: 'Le code PIN a été refusé par le support. Vérifiez-le, puis enregistrez la configuration ou appuyez sur « Tester la connexion ». Pas de nouvel essai d’ici là.',
       };
+    case 'dropped':
+      return {
+        en: 'The connection was cut twice in a row right after the PIN was sent (an unstable network, or a PIN the mount does not take): it is not sent again by itself, except by a stop (once per press). Check the network and the PIN, then save the configuration or press "Test the connection".',
+        fr: 'La connexion a été coupée deux fois de suite juste après l’envoi du code PIN (réseau instable, ou code que le support n’accepte pas) : il n’est plus renvoyé de lui-même, sauf par un arrêt (une fois par appui). Vérifiez le réseau et le code, puis enregistrez la configuration ou appuyez sur « Tester la connexion ».',
+      };
     case 'wait':
       return {
         en: 'The mount asks to wait after failed PIN attempts: tried again at the next read.',
@@ -174,9 +181,9 @@ export const T = {
     en: 'Type the IP address of the MotionMount in the configuration, like 192.168.1.50.',
     fr: 'Saisissez l’adresse IP du MotionMount dans la configuration, par exemple 192.168.1.50.',
   },
-  invalid: (text) => ({
-    en: `Address not understood: ${text}.`,
-    fr: `Adresse non comprise : ${text}.`,
+  invalid: (length) => ({
+    en: `The address typed (${length} characters) is not understood: type an IP address, like 192.168.1.50.`,
+    fr: `L’adresse saisie (${length} caractères) n’est pas comprise : saisissez une adresse IP, par exemple 192.168.1.50.`,
   }),
   local: {
     en: 'Names ending in .local do not resolve in the integration container: type the IP address.',
@@ -259,6 +266,18 @@ export const ERRORS = {
   pinRefused: {
     en: 'The PIN was refused by the mount: fix it in the configuration. Command not sent.',
     fr: 'Le code PIN a été refusé par le support : corrigez-le dans la configuration. Commande non envoyée.',
+  },
+  pinDropped: {
+    en: 'The connection was cut right after the PIN, twice in a row: check the network and the PIN in the configuration. Command not sent.',
+    fr: 'La connexion a été coupée juste après le code PIN, deux fois de suite : vérifiez le réseau et le code dans la configuration. Commande non envoyée.',
+  },
+  positionNotUnderstood: (extension, turn) => ({
+    en: `The position read from the mount is not understood (extension ${extension}, turn ${turn}): stop not sent.`,
+    fr: `La position lue sur le support n’est pas comprise (extension ${extension}, rotation ${turn}) : arrêt non envoyé.`,
+  }),
+  stopOtherMount: {
+    en: 'Stop sent to the MotionMount that answers at the address, but it is not the one of this device (another MAC address): this one may not be stopped.',
+    fr: 'Arrêt envoyé au MotionMount qui répond à l’adresse, mais ce n’est pas celui de cet appareil (autre adresse MAC) : celui-ci n’est peut-être pas arrêté.',
   },
   pinWait: {
     en: 'The mount asks to wait after failed PIN attempts: command not sent.',

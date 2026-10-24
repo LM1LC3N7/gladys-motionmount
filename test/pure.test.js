@@ -18,6 +18,7 @@ import {
   parseLine,
   positionValue,
   readLine,
+  stopTargetOf,
   stringOf,
   writeLine,
 } from '../src/motionmount/protocol.js';
@@ -98,10 +99,17 @@ test('errors: the new form (bits 16..30) and the old one (bit 31)', () => {
   assert.equal(blocksMoves(errorsOf(String(0x80000000 + (1 << 4)))), false, 'HDMI-CEC only');
 });
 
-test('position: big endian unsigned extension and signed turn, clamped', () => {
+test('position: big endian unsigned extension and signed turn, never clamped in silence', () => {
   assert.equal(positionValue(50, -50), '[0032ffce]');
   assert.equal(positionValue(100, 100), '[00640064]');
-  assert.equal(positionValue(-2, 104), '[00000064]');
+  assert.throws(() => positionValue(-2, 104));
+  assert.throws(() => positionValue(101, 0));
+  assert.deepEqual(stopTargetOf(101, -101), { extension: 100, turn: -100 });
+  assert.deepEqual(stopTargetOf(-3, 105), { extension: 0, turn: 100 });
+  assert.equal(stopTargetOf(999, 0), undefined);
+  assert.equal(stopTargetOf(20, -4000), undefined);
+  assert.equal(stopTargetOf(106, 0), undefined);
+  assert.equal(stopTargetOf(undefined, 0), undefined);
 });
 
 test('address and PIN: strict, never shown back', () => {

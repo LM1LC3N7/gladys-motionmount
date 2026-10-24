@@ -15,16 +15,19 @@
 //     within 3.5 s of the click or refused unsent, answered by 4.3 s. Only in a
 //     session whose identity (MAC) is the one of the device and whose PIN was
 //     accepted (or not needed).
-//   - "Stop" is always accepted: it is not behind the option, never waits in
-//     the lane, goes before every request not written yet and holds the
-//     connection (nothing else is written meanwhile), waits 1 s at most for
-//     the request on the wire (then cuts the connection and opens a new one),
-//     connects at once when the mount is not connected (through the waiting
-//     time after a failure: one try), and cancels every move not written yet.
-//     The protocol has no stop line: the stop reads the current position and
-//     sends it as the target (`mount/preset/position`), so the motors stop
-//     where they are. Checked again 1.5 s later, and sent again (3 times at
-//     most) while the mount says it moves, unless a move was written after it.
+//   - "Stop" is not behind the option nor the lane: it goes before every
+//     request not written yet and holds the connection (nothing else is
+//     written meanwhile), waits 1 s at most for the request on the wire (a
+//     stop included; then cuts the connection and opens a new one), reads
+//     1.5 s at most each, opens a new connection and tries once more when a
+//     read fails before its line, connects at once when the mount is not
+//     connected (through the waiting time after a failure), and cancels every
+//     move not written yet; presses before its line leaves join it. The
+//     protocol has no stop line: the stop reads the current position and
+//     sends it as the target (`mount/preset/position`), only when plausible.
+//     Checked again 1.5 s later (answered or not), and sent again while the
+//     mount says it moves or cannot tell, 3 rounds at most, unless a move was
+//     written after it.
 //   - a line that may have reached the mount is never answered "not sent":
 //     "sent, without confirmation", then reads; never written again by
 //     itself. After such a move, the other moves wait for the preset to be
@@ -38,7 +41,8 @@
 // configuration publishes nothing (generation checked after every await).
 // PIN: sent only when the mount says it is needed, once per connection;
 // refused -> a final stop kept in /data (another PIN, or a success of the
-// Test button, lifts it).
+// Test button, lifts it); two cuts right after it -> held the same way, but a
+// stop still sends it (once per press).
 // -----------------------------------------------------------------------------
 
 import { DEVICE_TRANSPORTS, createLogger } from '@gladysassistant/integration-sdk';
@@ -64,6 +68,7 @@ import {
   macOf,
   positionValue,
   readLine,
+  stopTargetOf,
   stringOf,
   writeLine,
 } from './motionmount/protocol.js';
@@ -147,6 +152,16 @@ export class MotionMountApp {
     this.timer = undefined;
     this.running = undefined;
     this.followUps = new Set();
+    /** The checks after a stop (kept apart from the follow-up reads: a move's reads never clear them). */
+    this.stopChecks = new Set();
+    /** The stop not written yet: a press arriving meanwhile joins it. */
+    this.pendingStop = undefined;
+    /** Resolved once the first start has the configuration (a stop waits for it). */
+    this.firstStart = new Promise((resolve) => {
+      this.markStarted = resolve;
+    });
+    /** The last MAC read at the address in this run (a change is logged). */
+    this.lastId = undefined;
     this.lane = new Lane();
     /** The moves not written yet (a STOP cancels them). */
     this.tickets = new Set();
@@ -196,10 +211,13 @@ export class MotionMountApp {
         this.memory.lastAttemptAt + this.timings.attemptPersistEvery,
       );
       this.nextConnectAt = this.now() + Math.max(0, last + this.interval - this.wall());
+      // The Test button counts from the same attempt (never sooner than the interval).
+      this.attemptAt = this.now() - Math.max(0, this.wall() - last);
     } else {
       // New address or PIN: at once.
       this.nextConnectAt = this.now();
     }
+    this.markStarted();
     await this.tidyMemory();
     if (generation !== this.generation) {
       return;
@@ -221,8 +239,13 @@ export class MotionMountApp {
       this.timers.clearTimeout(handle);
     }
     this.followUps.clear();
+    for (const handle of this.stopChecks) {
+      this.timers.clearTimeout(handle);
+    }
+    this.stopChecks.clear();
     for (const ticket of this.tickets) {
       ticket.cancelled = true;
+      ticket.reason ??= ERRORS.configChanged;
     }
     this.publisher.stop();
     this.closeSession();
@@ -236,7 +259,16 @@ export class MotionMountApp {
   closeSession() {
     const session = this.session;
     this.session = undefined;
-    session?.conn?.close('closed');
+    if (session) {
+      session.intentional = true;
+      session.conn?.close('closed');
+    }
+  }
+
+  /** A connection closed on purpose (a stop cuts a busy or stale one): not a failure of the mount. */
+  cut(session) {
+    session.intentional = true;
+    session.conn?.close('timeout');
   }
 
   clearTimer() {
@@ -302,18 +334,15 @@ export class MotionMountApp {
   /** What /data holds for another address, or a block of another PIN, is dropped. */
   async tidyMemory() {
     const m = this.memory;
-    const before = JSON.stringify([m.identity, m.pinBlock, m.pinDrops]);
+    const before = JSON.stringify([m.pinBlock, m.pinDrops]);
     const mark = this.config.pin ? pinMarkOf(m.salt, this.config.key, this.config.pin) : undefined;
-    if (m.identity && m.identity.address !== this.config.key) {
-      m.identity = undefined;
-    }
     if (m.pinBlock && (m.pinBlock.address !== this.config.key || m.pinBlock.mark !== mark)) {
       m.pinBlock = undefined;
     }
     if (m.pinDrops && (m.pinDrops.address !== this.config.key || m.pinDrops.mark !== mark)) {
       m.pinDrops = undefined;
     }
-    if (JSON.stringify([m.identity, m.pinBlock, m.pinDrops]) !== before) {
+    if (JSON.stringify([m.pinBlock, m.pinDrops]) !== before) {
       await this.saveMemory();
     }
   }
@@ -324,28 +353,40 @@ export class MotionMountApp {
     return pinMarkOf(this.memory.salt, this.config.key, this.config.pin);
   }
 
-  pinBlocked() {
+  /** The block of the PIN typed: undefined, or 'refused' (said by the mount) or 'drops' (two cuts). */
+  pinBlockKind() {
     const block = this.memory?.pinBlock;
-    return Boolean(
-      block &&
+    return block &&
       this.config.pin &&
       block.address === this.config.key &&
-      block.mark === this.pinMark(),
-    );
+      block.mark === this.pinMark()
+      ? block.kind
+      : undefined;
   }
 
-  /** The PIN refused: a final stop for that PIN, never tried again by itself. */
-  async blockPin() {
+  pinBlocked() {
+    return this.pinBlockKind() !== undefined;
+  }
+
+  /**
+   * The PIN held: a final stop for that PIN, never tried again by itself.
+   * `kind` 'refused': the mount said so; 'drops': the connection was cut
+   * right after it twice in a row (a stop still sends it, once per press).
+   */
+  async blockPin(kind = 'refused') {
     const previous = this.memory.pinBlock;
     this.memory.pinBlock = {
       address: this.config.key,
       mark: this.pinMark(),
+      kind,
       failures: (previous?.failures ?? 0) + 1,
     };
     this.memory.pinDrops = undefined;
     await this.saveMemory();
     this.logger.warn(
-      'PIN refused by the mount; not tried again until it changes or the Test button',
+      kind === 'refused'
+        ? 'PIN refused by the mount; not tried again until it changes or the Test button'
+        : 'Connection cut right after the PIN twice in a row; not tried again by itself (a stop still sends it)',
     );
   }
 
@@ -356,7 +397,7 @@ export class MotionMountApp {
     const count =
       drops && drops.address === this.config.key && drops.mark === mark ? drops.count + 1 : 1;
     if (count >= 2) {
-      await this.blockPin();
+      await this.blockPin('drops');
       return;
     }
     this.memory.pinDrops = { address: this.config.key, mark, count };
@@ -441,7 +482,11 @@ export class MotionMountApp {
     this.logger.info(`Connected to the MotionMount at ${this.config.key}`);
     session.setup = this.setup(session, { trial }).catch((err) => {
       if (this.alive(session)) {
+        // Never a half-read session left open: closed, and tried again after the wait.
         this.logger.warn(`Reading the mount failed: ${reasonOf(err).en}`);
+        session.closeError =
+          err instanceof MotionMountError ? err : new MotionMountError('invalid');
+        session.conn.close('invalid');
       }
     });
     return session;
@@ -464,10 +509,17 @@ export class MotionMountApp {
       return;
     }
     this.session = undefined;
+    if (session.intentional) {
+      // Cut on purpose (a stop): not a failure; the stop opens a new one.
+      this.badges = undefined;
+      return;
+    }
     if (session.pinSent && session.auth === 'unknown' && this.config.pin) {
       this.pinDropped().catch(() => {});
     }
-    this.failed(new MotionMountError(reason === 'unreachable' ? 'closed' : reason));
+    this.failed(
+      session.closeError ?? new MotionMountError(reason === 'unreachable' ? 'closed' : reason),
+    );
     this.badges = undefined;
     if (this.started) {
       this.schedule();
@@ -476,9 +528,9 @@ export class MotionMountApp {
   }
 
   /** One read on the connection of `session`: the raw value, or undefined when the mount refuses (#4xx). */
-  async read(session, key, { rank = RANK.read, timeout, optional = false } = {}) {
+  async read(session, key, { rank = RANK.read, timeout, deadline, optional = false } = {}) {
     try {
-      return await session.conn.read(key, readLine(key), { rank, timeout });
+      return await session.conn.read(key, readLine(key), { rank, timeout, deadline });
     } catch (err) {
       if (optional && err?.kind === 'refused') {
         return undefined;
@@ -503,40 +555,33 @@ export class MotionMountApp {
     session.ready = true;
     this.failures = 0;
     this.lastError = undefined;
-    await this.noteIdentity(session);
+    this.noteIdentity(session);
     if (this.alive(session)) {
       this.schedule();
       await this.publishAll();
     }
   }
 
-  /** The identity at the address, and when it was last read (at most once a minute in /data). */
-  async noteIdentity(session) {
+  /** The MAC read at the address (memory only): a change is logged. */
+  noteIdentity(session) {
     if (!session.id) {
       // An identity that cannot be read is not "another mount": nothing changes.
       return;
     }
-    const kept = this.memory.identity;
-    const wall = this.wall();
-    if (kept?.id && kept.id !== session.id) {
+    if (this.lastId && this.lastId !== session.id) {
       this.logger.warn(`Another MotionMount answers at ${this.config.key} now`);
     }
-    if (
-      kept?.id !== session.id ||
-      kept.address !== this.config.key ||
-      wall - kept.readAt >= this.timings.attemptPersistEvery
-    ) {
-      this.memory.identity = { address: this.config.key, id: session.id, readAt: wall };
-      await this.saveMemory();
-    }
+    this.lastId = session.id;
   }
 
   /**
    * The PIN: sent only when the mount says it is needed and it may be tried,
    * once per connection, never when it was refused (except for the Test
-   * button: once). The status read after it decides.
+   * button: once; and a stop, once per press, when the block comes from cuts
+   * only). The status read after it decides: not authenticated, or a refusal
+   * code, is a refusal.
    */
-  async authenticate(session, { rank = RANK.read, trial = false, timeout } = {}) {
+  async authenticate(session, { rank = RANK.read, trial = false, forStop = false, timeout } = {}) {
     const status = authOf(
       await this.read(session, KEYS.authStatus, { rank, timeout, optional: true }),
     );
@@ -556,16 +601,18 @@ export class MotionMountApp {
       session.auth = 'needed';
       return;
     }
-    if (this.pinBlocked() && !trial) {
-      session.auth = 'refused';
+    const block = this.pinBlockKind();
+    const oncePerPress = forStop && block === 'drops';
+    if (block && !trial && !oncePerPress) {
+      session.auth = block === 'drops' ? 'dropped' : 'refused';
       return;
     }
     if (!status.canTry) {
       session.auth = 'wait';
       return;
     }
-    if (trial) {
-      // The Test button: the user asks for one more try.
+    if (trial || oncePerPress) {
+      // The Test button, or a stop: the user asks for one more try.
       session.pinSent = false;
     }
     if (!session.pinSent) {
@@ -590,7 +637,10 @@ export class MotionMountApp {
         }
       }
     }
-    const after = authOf(await this.read(session, KEYS.authStatus, { rank, timeout }));
+    // A refusal code here (#401...) answers the PIN: a refusal.
+    const after = authOf(
+      await this.read(session, KEYS.authStatus, { rank, timeout, optional: true }),
+    );
     if (after?.authenticated) {
       session.auth = 'ok';
       this.logger.info('PIN accepted by the mount');
@@ -695,11 +745,16 @@ export class MotionMountApp {
 
   /** One run at a time: a tick during a run joins it. */
   tick(options = {}) {
-    if (!this.running) {
-      this.running = this.run(options).finally(() => {
-        this.running = undefined;
-      });
+    if (this.running) {
+      // The Test button during a periodic run: its PIN try comes after it.
+      return options.trial && !this.runningTrial
+        ? this.running.then(() => this.tick(options))
+        : this.running;
     }
+    this.runningTrial = Boolean(options.trial);
+    this.running = this.run(options).finally(() => {
+      this.running = undefined;
+    });
     return this.running;
   }
 
@@ -712,10 +767,13 @@ export class MotionMountApp {
     try {
       const now = this.now();
       if (this.alive(this.session)) {
-        if (trial || now >= this.refreshAt + this.interval) {
+        if (now >= this.refreshAt + this.interval) {
           await this.refresh(this.session, { trial });
+        } else if (trial && this.session.ready && this.pinBlocked()) {
+          // Read less than an interval ago: only the PIN try the user asks.
+          await this.authenticate(this.session, { trial });
         }
-      } else if (trial || now >= this.nextConnectAt) {
+      } else if (now >= this.nextConnectAt || (trial && now >= this.attemptAt + this.interval)) {
         const session = await this.openSession({ trial });
         await session.setup;
       }
@@ -740,7 +798,7 @@ export class MotionMountApp {
     this.refreshAt = this.now();
     if (!session.id) {
       session.id = macOf(await this.read(session, KEYS.mac, { optional: true }));
-      await this.noteIdentity(session);
+      this.noteIdentity(session);
       this.published = undefined;
     }
     if (session.auth !== 'ok' || trial) {
@@ -781,11 +839,12 @@ export class MotionMountApp {
 
   /** The PIN state to show (undefined: nothing to say). */
   pinState() {
-    if (this.pinBlocked()) {
-      return 'refused';
+    const block = this.pinBlockKind();
+    if (block) {
+      return block === 'drops' ? 'dropped' : 'refused';
     }
     const session = this.session;
-    if (this.alive(session) && ['needed', 'refused', 'wait'].includes(session.auth)) {
+    if (this.alive(session) && ['needed', 'refused', 'wait', 'dropped'].includes(session.auth)) {
       return session.auth;
     }
     return undefined;
@@ -1035,7 +1094,8 @@ export class MotionMountApp {
     }
     const now = this.now();
     const last = this.alive(this.session) ? this.refreshAt : this.attemptAt;
-    if (now < last + this.interval) {
+    // A run in progress is joined (no read of its own), then the PIN tried once.
+    if (now < last + this.interval && !this.running) {
       await this.updateStatus();
       return join(T.test.recent(age(last + this.interval - now)), this.status()[1]);
     }
@@ -1059,7 +1119,7 @@ export class MotionMountApp {
       if (numberIn(value, PRESSED, PRESSED) !== PRESSED) {
         throw this.refusal(ERRORS.badValue);
       }
-      return this.stopNow(received);
+      return this.stopNow(received, target.id);
     }
     if (target?.key !== FEATURES.PRESET) {
       throw this.refusal(ERRORS.readOnly);
@@ -1090,14 +1150,19 @@ export class MotionMountApp {
     }
   }
 
-  /** The checks of a move, on the latest configuration and session: on arrival, after the reads, before writing. */
-  checkMove(ticket, session, sendBy) {
+  /** A move cancelled (by a stop, by a new configuration) says why. */
+  checkTicket(ticket) {
     if (ticket.cancelled) {
-      throw this.refusal(ERRORS.stopped);
+      throw this.refusal(ticket.reason ?? ERRORS.stopped);
     }
     if (ticket.generation !== this.generation) {
       throw this.refusal(ERRORS.configChanged);
     }
+  }
+
+  /** The checks of a move, on the latest configuration and session: on arrival, after the reads, before writing. */
+  checkMove(ticket, session, sendBy) {
+    this.checkTicket(ticket);
     if (!this.config.allowMoves) {
       throw this.refusal(ERRORS.movesDisabled);
     }
@@ -1115,6 +1180,9 @@ export class MotionMountApp {
     }
     if (session.auth === 'wait') {
       throw this.refusal(ERRORS.pinWait);
+    }
+    if (session.auth === 'dropped') {
+      throw this.refusal(ERRORS.pinDropped);
     }
     if (session.auth !== 'ok') {
       throw this.refusal(ERRORS.notConnected);
@@ -1135,9 +1203,9 @@ export class MotionMountApp {
     const session = this.session;
     const check = () => this.checkMove(ticket, session, sendBy);
     check();
-    const left = () => Math.max(50, sendBy - this.now());
+    // Each read: its own timeout, and the deadline of the command whatever its wait in the queue.
     const readNow = (key, optional = false) =>
-      this.read(session, key, { rank: RANK.command, timeout: left(), optional });
+      this.read(session, key, { rank: RANK.command, deadline: sendBy, optional });
     let extension = 0;
     let turn = 0;
     let errors;
@@ -1154,7 +1222,9 @@ export class MotionMountApp {
       if (err?.refusal) {
         throw err;
       }
-      if (this.now() > sendBy) {
+      // A stop or a new configuration closed the connection: say that, not "lost".
+      this.checkTicket(ticket);
+      if (this.now() > sendBy || err?.kind === 'late') {
         throw this.refusal(ERRORS.tooSlow);
       }
       // A read has no effect: nothing was sent.
@@ -1180,7 +1250,8 @@ export class MotionMountApp {
     try {
       await session.conn.write(KEYS.presetIndex, writeLine(KEYS.presetIndex, ticket.index), {
         rank: RANK.command,
-        timeout: Math.max(200, answerBy - this.now()),
+        timeout: this.timings.commandAnswerBy,
+        deadline: answerBy,
         tag: 'move',
         // The very last check, right before the line leaves.
         beforeSend: () => {
@@ -1203,10 +1274,12 @@ export class MotionMountApp {
       }
       if (!err?.sent) {
         this.logger.warn(`${name} NOT sent (${reasonOf(err).en})`);
-        throw this.refusal(ERRORS.notSent(reasonOf(err)));
+        this.checkTicket(ticket);
+        throw this.refusal(err?.kind === 'late' ? ERRORS.tooSlow : ERRORS.notSent(reasonOf(err)));
       }
-      // Written, no answer: it may be moving. Confirmed only by the mount at rest there.
-      if (ticket.generation === this.generation) {
+      // Written, no answer: it may be moving. Confirmed only by the mount at rest
+      // there; nothing to wait for when a stop came meanwhile (it was cut).
+      if (ticket.generation === this.generation && !ticket.cancelled) {
         this.target = { extension, turn };
         this.notReached = false;
         this.unconfirmedUntil = this.now() + this.timings.unconfirmedGuard;
@@ -1228,107 +1301,201 @@ export class MotionMountApp {
 
   /**
    * STOP: never behind the lane nor the option; every move not written yet is
-   * cancelled first, even when this STOP fails.
+   * cancelled first, even when this STOP fails. A press while a stop is not
+   * written yet joins it; once written, a new press is a new stop (it cuts a
+   * stop write still unanswered after 1 s).
    */
-  async stopNow(received) {
+  async stopNow(received, pressedId) {
     for (const ticket of this.tickets) {
       ticket.cancelled = true;
+      ticket.reason ??= ERRORS.stopped;
     }
     this.target = undefined;
     this.notReached = false;
+    this.unconfirmedUntil = -Infinity;
+    const sendBy = received + this.timings.commandSendBy;
+    const answerBy = received + this.timings.commandAnswerBy;
+    await this.untilStarted(sendBy);
     if (!this.config.address) {
       throw this.refusal(ERRORS.noHost);
     }
+    if (this.pendingStop && !this.pendingStop.written) {
+      return this.pendingStop.promise;
+    }
     this.commandSeq += 1;
-    const stopSeq = this.commandSeq;
-    const { cut } = await this.sendStop({
-      sendBy: received + this.timings.commandSendBy,
-      answerBy: received + this.timings.commandAnswerBy,
-    });
+    const run = { written: false, stopSeq: this.commandSeq };
+    run.promise = this.runStop(run, { sendBy, answerBy, pressedId });
+    this.pendingStop = run;
+    try {
+      return await run.promise;
+    } finally {
+      if (this.pendingStop === run) {
+        this.pendingStop = undefined;
+      }
+    }
+  }
+
+  /** A stop arriving while the container starts waits for the configuration (within its budget). */
+  async untilStarted(sendBy) {
+    if (this.memory && this.started) {
+      return;
+    }
+    let timer;
+    await Promise.race([
+      this.firstStart,
+      new Promise((resolve) => {
+        // A real timer: the wait is short and bounded by the command.
+        timer = setTimeout(resolve, Math.max(0, sendBy - this.now() - 1500));
+      }),
+    ]);
+    clearTimeout(timer);
+  }
+
+  async runStop(run, { sendBy, answerBy, pressedId }) {
+    for (const handle of this.stopChecks) {
+      this.timers.clearTimeout(handle);
+    }
+    this.stopChecks.clear();
+    let result;
+    try {
+      result = await this.sendStop({
+        sendBy,
+        answerBy,
+        onWrite: () => {
+          run.written = true;
+        },
+      });
+    } catch (err) {
+      if (err?.stopSent) {
+        // Written without an answer: checked again like any stop (in doubt, stop again).
+        this.checkStop(run.stopSeq, 1, true);
+      }
+      throw err;
+    }
     this.logger.info('MotionMount: stop sent');
     this.followUp();
-    this.checkStop(stopSeq, 1, cut);
+    this.checkStop(run.stopSeq, 1, result.cut);
+    if (result.id && pressedId && result.id !== pressedId) {
+      // The stop went to what answers at the address: not the mount of this device.
+      this.logger.warn('MotionMount: stop sent to another mount than the one of the device');
+      throw this.refusal(ERRORS.stopOtherMount);
+    }
   }
 
   /**
-   * The stop itself, on the connection held for it: the current position read
-   * and sent back as the target. A connection busy past 1 s with another
-   * request is cut and opened again.
-   * @returns {Promise<{ cut: boolean }>} cut: a move was on the wire when the connection was cut
+   * The stop itself, on a connection held for it: the current position read
+   * (each read 1.5 s at most) and sent back as the target. A request on the
+   * wire past 1 s (any, a stop included) gets the connection cut and opened
+   * again; a read failing before the stop line (a stale or cut connection)
+   * opens a new connection and tries once more, within the budget.
+   * @returns {Promise<{ cut: boolean, id?: string }>} cut: a move was on the
+   *   wire when the connection was cut; id: the MAC of the mount stopped
    */
-  async sendStop({ sendBy, answerBy }) {
+  async sendStop({ sendBy, answerBy, onWrite }) {
     const generation = this.generation;
     const left = () => sendBy - this.now();
     let cut = false;
     let session;
-    let release;
-    try {
+    let release = () => {};
+    const open = async () => {
+      release();
       session = await this.openSession({
-        timeout: Math.min(this.timings.connectTimeout, left() - 300),
+        timeout: Math.max(100, Math.min(this.timings.connectTimeout, left() - 300)),
       });
       release = session.conn.hold();
+    };
+    const acquire = async () => {
+      await open();
       const current = session.conn.current;
-      if (current && current.rank !== RANK.stop) {
+      if (current) {
         const idle = await session.conn.waitIdle(
           Math.max(0, Math.min(this.timings.stopWaitInFlight, left() - 1500)),
         );
-        if (!idle) {
-          cut = current.tag === 'move';
+        if (!idle && this.alive(session)) {
+          cut ||= current.tag === 'move';
           this.logger.warn('MotionMount: the connection is busy, cut for the stop');
           release();
-          session.conn.close('timeout');
-          session = await this.openSession({
-            timeout: Math.min(this.timings.connectTimeout, left() - 300),
-          });
-          release = session.conn.hold();
+          this.cut(session);
         }
       }
-    } catch (err) {
-      release?.();
-      if (err?.refusal) {
-        throw err;
+      // Closed meanwhile (cut above, by another stop, by a new configuration): a new one.
+      if (!this.alive(session)) {
+        await open();
       }
-      throw this.refusal(this.now() > sendBy ? ERRORS.tooSlow : ERRORS.notSent(reasonOf(err)));
+    };
+    const readTimeout = () => Math.max(50, Math.min(this.timings.requestTimeout, left()));
+    let position;
+    for (let attempt = 1; ; attempt += 1) {
+      try {
+        await acquire();
+        if (session.auth !== 'ok') {
+          await this.authenticate(session, {
+            rank: RANK.stop,
+            forStop: true,
+            timeout: readTimeout(),
+          });
+        }
+        const extension = intOf(
+          await this.read(session, KEYS.extension, { rank: RANK.stop, timeout: readTimeout() }),
+        );
+        const turn = intOf(
+          await this.read(session, KEYS.turn, { rank: RANK.stop, timeout: readTimeout() }),
+        );
+        position = { extension, turn };
+        break;
+      } catch (err) {
+        if (err?.refusal) {
+          release();
+          throw err;
+        }
+        const reason = reasonOf(err);
+        if (err?.answered) {
+          // The mount answered a read with a refusal (#4xx): it will not take a stop either.
+          release();
+          this.logger.warn(`MotionMount: stop refused (${reason.en})`);
+          throw this.refusal(ERRORS.refused(reason));
+        }
+        if (attempt >= 2 || left() < 800) {
+          release();
+          throw this.refusal(left() <= 0 ? ERRORS.tooSlow : ERRORS.notSent(reason));
+        }
+        // A stale or cut connection: a new one, once.
+        this.logger.warn(`MotionMount: stop: ${reason.en}, connecting again`);
+        if (this.alive(session)) {
+          this.cut(session);
+        }
+      }
     }
-    let extension;
-    let turn;
-    try {
-      const timeout = () => Math.max(50, left());
-      if (session.auth !== 'ok') {
-        await this.authenticate(session, { rank: RANK.stop, timeout: timeout() });
-      }
-      extension = intOf(
-        await this.read(session, KEYS.extension, { rank: RANK.stop, timeout: timeout() }),
-      );
-      turn = intOf(await this.read(session, KEYS.turn, { rank: RANK.stop, timeout: timeout() }));
-    } catch (err) {
-      release();
-      if (err?.refusal) {
-        throw err;
-      }
-      // A read (or the PIN) failed: the stop line was not written.
-      throw this.refusal(this.now() > sendBy ? ERRORS.tooSlow : ERRORS.notSent(reasonOf(err)));
-    }
-    if (extension === undefined || turn === undefined) {
+    if (position.extension === undefined || position.turn === undefined) {
       release();
       throw this.refusal(ERRORS.positionUnknown);
+    }
+    // Only a plausible position: never a far value brought into range (it would be a move).
+    const target = stopTargetOf(position.extension, position.turn);
+    if (!target) {
+      release();
+      this.logger.warn('MotionMount: stop not sent, position not understood');
+      throw this.refusal(ERRORS.positionNotUnderstood(position.extension, position.turn));
     }
     try {
       await session.conn.write(
         KEYS.presetPosition,
-        writeLine(KEYS.presetPosition, positionValue(extension, turn)),
+        writeLine(KEYS.presetPosition, positionValue(target.extension, target.turn)),
         {
           rank: RANK.stop,
-          timeout: Math.max(200, answerBy - this.now()),
+          timeout: this.timings.commandAnswerBy,
+          deadline: answerBy,
           tag: 'stop',
           beforeSend: () => {
             if (this.now() > sendBy) {
               throw this.refusal(ERRORS.tooSlow);
             }
+            onWrite?.();
           },
         },
       );
     } catch (err) {
+      release();
       if (err?.beforeSend) {
         throw err;
       }
@@ -1338,59 +1505,84 @@ export class MotionMountApp {
         throw this.refusal(ERRORS.refused(reason));
       }
       if (!err?.sent) {
-        throw this.refusal(this.now() > sendBy ? ERRORS.tooSlow : ERRORS.notSent(reason));
+        throw this.refusal(
+          left() <= 0 || err?.kind === 'late' ? ERRORS.tooSlow : ERRORS.notSent(reason),
+        );
       }
       if (generation === this.generation) {
         this.followUp();
       }
       this.logger.warn(`MotionMount: stop sent, NOT confirmed (${reason.en})`);
-      throw this.refusal(ERRORS.sentUnconfirmed(reason));
-    } finally {
-      release();
+      const unconfirmed = this.refusal(ERRORS.sentUnconfirmed(reason));
+      unconfirmed.stopSent = true;
+      throw unconfirmed;
     }
-    return { cut };
+    // The mount stopped: whose MAC (read if this connection did not read it yet).
+    let id = session.id;
+    if (!id && this.alive(session)) {
+      id = macOf(
+        await this.read(session, KEYS.mac, {
+          rank: RANK.stop,
+          timeout: 500,
+          optional: true,
+        }).catch(() => undefined),
+      );
+    }
+    release();
+    return { cut, id };
   }
 
   /**
-   * After a stop: 1.5 s later, while the mount still says it moves (or a move
-   * was cut on the wire), stop again, 3 times at most, unless a move was
-   * written after the stop (the user wants it).
+   * After a stop (answered, or written without an answer): 1.5 s later, while
+   * the mount still says it moves (or cannot tell, or a move was cut on the
+   * wire), stop again; 3 rounds at most, kept when a re-send fails; never
+   * after a move written after the stop (the user wants it). The motion is
+   * read on any live connection, or a new one.
    */
-  checkStop(stopSeq, round, cut) {
+  checkStop(stopSeq, round, force) {
     if (round > this.timings.stopResends) {
       return;
     }
     const generation = this.generation;
     const handle = this.timers.setTimeout(async () => {
-      this.followUps.delete(handle);
-      if (generation !== this.generation || this.lastMoveWritten > stopSeq) {
+      this.stopChecks.delete(handle);
+      const newer = () => generation !== this.generation || this.lastMoveWritten > stopSeq;
+      if (newer()) {
+        return;
+      }
+      let moving = force;
+      if (!moving) {
+        try {
+          const session = this.alive(this.session) ? this.session : await this.openSession();
+          const value = boolOf(
+            await this.read(session, KEYS.moving, { rank: RANK.stop, optional: true }),
+          );
+          // Unreadable: in doubt, stop again.
+          moving = value !== false;
+        } catch {
+          moving = true;
+        }
+      }
+      if (!moving || newer()) {
         return;
       }
       try {
-        let moving = cut && round === 1;
-        const session = this.session;
-        if (!moving && this.alive(session) && session.ready) {
-          moving =
-            boolOf(await this.read(session, KEYS.moving, { rank: RANK.stop, optional: true })) ===
-            true;
-        }
-        if (!moving || generation !== this.generation || this.lastMoveWritten > stopSeq) {
-          return;
-        }
         const now = this.now();
         await this.sendStop({
           sendBy: now + this.timings.commandSendBy,
           answerBy: now + this.timings.commandAnswerBy,
         });
         this.logger.info('MotionMount: stop sent again (the mount still moved)');
-        this.checkStop(stopSeq, round + 1, false);
       } catch (err) {
         this.logger.warn(
-          `MotionMount: checking the stop failed (${err?.refusal ? err.message : reasonOf(err).en})`,
+          `MotionMount: sending the stop again failed (${err?.refusal ? err.message : reasonOf(err).en})`,
         );
       }
+      if (!newer()) {
+        this.checkStop(stopSeq, round + 1, false);
+      }
     }, this.timings.stopCheck);
-    this.followUps.add(handle);
+    this.stopChecks.add(handle);
   }
 
   /**

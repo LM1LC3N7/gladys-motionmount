@@ -82,49 +82,90 @@ each read.
 
 **Go to a preset**: right before acting, the integration reads the errors of
 the mount and the preset asked (set? within the bounds?), then sends the
-command. It is refused, nothing sent, when:
+command. One move at a time: the next one waits until the previous one is
+sent. The command is refused, **nothing sent**, when:
 
+- the value is not a preset from 0 to 7, or no address is configured;
 - the moves option is off (checked on arrival, after the reads and right
   before sending);
-- the mount is not connected, or its identity (MAC address) is not the one of
-  the device (its IP address was given to another one);
+- the mount is not connected (or its first read is not finished), or its
+  identity (MAC address) is not the one of the device;
 - the mount asks for a PIN that is missing, refused, or asks to wait after
-  failed attempts;
-- the preset is not set, or is beyond the bounds;
-- the mount reports an error (obstruction, motor, internal, width);
-- a stop arrived meanwhile;
+  failed attempts, or the connection was cut twice in a row right after the
+  PIN was sent;
 - the previous move left without confirmation less than 30 s ago and the
   mount has not reached it yet;
-- the command could not leave within 3.5 s.
+- the mount could not be read before acting (no answer, connection lost,
+  value not readable);
+- the preset is not set, or is beyond the bounds;
+- the mount reports an error (obstruction, motor, internal, width);
+- a stop arrived meanwhile, or the configuration changed meanwhile;
+- the connection was lost before sending, or the command could not leave
+  within 3.5 s.
 
-One move at a time: the next one waits until the previous one is sent. A
-command that left without an answer of the mount is reported "sent, without
-confirmation", and never sent again by itself.
+Once the command is written:
+
+- the mount may **refuse** it itself (`#4xx`): nothing is done, the refusal is
+  reported;
+- without an answer of the mount, it is reported "sent, without
+  confirmation", and never sent again by itself.
 
 **Stop**: the MotionMount protocol has no stop command. The integration reads
 the current position and sends it back as the new target: the motors stop
-where they are (give or take the rounding). The stop cancels the moves not sent
-yet, goes before every other request, and waits 1 s at most for the request on
-the wire (then the connection is cut and opened again). When the mount is not
-connected, the stop opens a connection at once (one try), even during the wait
-after a failure. 1.5 s later, when the mount still says it moves, the stop is
-sent again (3 times at most), unless a move was sent after it. The cases where
-the stop fails:
+where they are. A position read up to 5 points outside the travel (mechanical
+play) is brought back to the bound; further, nothing is written.
 
-- no address is configured, or the mount does not answer (no connection in
-  time);
-- the current position cannot be read;
-- the mount asks for a PIN that is not typed, or was already refused (it is
-  not sent again), or asks to wait: the mount then refuses the stop;
-- the stop could not leave within 3.5 s.
+- The stop does not depend on the moves option and cancels the moves not sent
+  yet.
+- It goes before the other requests not sent yet, and waits 1 s at most for
+  the request on the wire, a previous stop included (then the connection is
+  cut and opened again).
+- Each read of the stop waits 1.5 s at most; when a read fails before sending
+  (a stale or cut connection), a new connection is opened and the stop tried
+  once more, within the deadline.
+- When the mount is not connected, the stop opens a connection at once, even
+  during the wait after a failure.
+- Several presses while a stop is not sent yet share that stop.
+- While the container starts, the stop waits for the configuration (2 s at
+  most).
+- When a PIN is typed and the mount asks for it, the stop sends it; a PIN the
+  mount refused is not sent again, but one held because of two cuts is (once
+  per press).
+
+1.5 s after a stop (answered, or sent without an answer), the integration reads
+the motion of the mount (opening a connection when needed). When it still
+moves, or cannot tell, the stop is sent again, and so on, 3 times at most; a
+re-send that fails does not end these rounds. They end when a move was sent
+after the stop, or when the configuration changes. They are not kept in
+`/data`: a restart of the container in the seconds after the stop loses them.
+
+The cases where the stop fails:
+
+- no address is configured (after the wait of the start);
+- the mount does not answer: no connection, or reads without an answer on the
+  first connection and then on the new one;
+- the current position cannot be read, or is not understood (too far outside
+  the travel): nothing is written;
+- the mount refuses the stop or a read (`#401`: PIN missing, refused or a wait
+  imposed; `#400`, `#403`, `#405`...);
+- the stop could not leave within 3.5 s;
+- it is written without an answer: "sent, without confirmation" (then checked
+  as above);
+- it went to another MotionMount than the one of the device (another MAC
+  address answers at the address): sent, but reported, since the mount of the
+  device may not be stopped.
 
 ## Privacy and security
 
-- The PIN never shows in the logs, the connection status nor in `/data`. When
-  the mount refuses it, only an **8-bit mark** (a truncated salted hash, shared
-  by about 39 PINs out of 9999) is kept in `/data`, to see that the PIN typed
-  changed: the refusal is final until another PIN or a click on **Test the
-  connection** (one try).
+- The PIN is written neither to the logs, nor to the connection status, nor to
+  `/data`. An address the integration does not understand is not shown back
+  either (only its length): a PIN pasted in the wrong field does not show.
+- When the mount refuses the PIN (or the connection is cut twice in a row
+  right after it), only an **8-bit mark** (a truncated salted hash, shared by
+  about 39 PINs out of 9999) is kept in `/data`, to see that the PIN typed
+  changed. The PIN is not sent again by itself until another PIN or a click on
+  **Test the connection** (one try); only the stop still sends it, once per
+  press, when the hold comes from cuts.
 - The MotionMount protocol travels in clear on your local network.
 - No cloud, no account, no Bluetooth.
 
@@ -132,7 +173,10 @@ the stop fails:
 
 - **Unreachable**: check the IP address and the Ethernet cable; the mount
   answers on port 23. After a failure, the integration tries again after 30 s,
-  1, 2 then 5 min, never sooner than the interval.
+  1, 2 then 5 min, and at least the interval (the **Test the connection**
+  button too, restarts included: the time of the last attempt is kept in
+  `/data`). Exceptions: a stop and its checks, and the reads that follow a
+  command, may open a connection sooner.
 - **Identity cannot be read**: firmware too old (no MAC address); update the
   mount with the Vogel's app.
 - **Preset not reached** (orange dot): an obstruction, a hand on the TV or a

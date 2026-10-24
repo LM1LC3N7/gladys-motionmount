@@ -47,10 +47,14 @@ test/helpers/fakeMount.js    a fake MotionMount on 127.0.0.1
 - Positions are bounded (`max_extension`, `max_turn`), checked on the preset
   read just before acting; a move is refused while the mount reports an
   obstruction, a motor, internal or TV width error.
-- Stop is never behind the option, the lane or a read of anything but the
-  position it sends back; it holds the connection (`RANK.stop`, `hold()`),
-  waits 1 s at most for the request on the wire, connects at once when needed,
-  cancels the moves not written yet. Never put it behind anything.
+- Stop is not behind the option nor the lane; it reads only what it needs
+  (the authentication status and the PIN when the mount asks, then the
+  position it sends back, each read 1.5 s at most), holds the connection
+  (`RANK.stop`, `hold()`), waits 1 s at most for the request on the wire (a
+  stop included), retries once on a new connection when a read fails before
+  the line, connects at once when needed, cancels the moves not written yet.
+  It writes only a plausible position (`stopTargetOf`), never a far value
+  brought into range. Never put it behind anything else.
 - A line that may have left is never told "not sent"; never retried by the
   integration; the ack never waits for a publication to Gladys.
 - The PIN never reaches a log, /data, a status nor an error; only digits enter

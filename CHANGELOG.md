@@ -18,7 +18,8 @@ the notes of the version's GitHub Release.
 - Moves are off by default ("Allow moves"), bounded by a maximum extension and
   turn, and refused while the mount reports an obstruction or an error.
 - Stop is not behind the option, goes before every other request, connects at
-  once when needed, cancels the moves not sent yet, and is sent again while the
-  mount still moves.
+  once when needed (and again, once, when the connection is stale), cancels
+  the moves not sent yet, writes only a plausible position, and is checked and
+  sent again while the mount still moves.
 - Optional PIN of the User level, sent only when the mount asks for it; a
   refused PIN is never tried again by itself.

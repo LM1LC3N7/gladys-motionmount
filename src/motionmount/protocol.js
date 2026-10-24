@@ -163,12 +163,48 @@ export function errorsOf(value) {
 export const blocksMoves = (errors) =>
   Boolean(errors && (errors.motor || errors.obstruction || errors.internal || errors.tvWidth));
 
-/** The value of `mount/preset/position`: `[EEEETTTT]`, extension and turn clamped to the protocol ranges. */
+/** How far outside the travel a position read for a stop may be (rounding, mechanical play). */
+export const STOP_TOLERANCE = 5;
+
+/**
+ * The target of a stop: the position read, when it is a plausible one (an
+ * integer within the protocol ranges, or at most STOP_TOLERANCE outside,
+ * brought back to the bound). Anything further is not understood: undefined,
+ * never a far value brought into range (that would be a move to the end).
+ */
+export function stopTargetOf(extension, turn) {
+  const [eMin, eMax] = RANGE.extension;
+  const [tMin, tMax] = RANGE.turn;
+  if (
+    !Number.isInteger(extension) ||
+    !Number.isInteger(turn) ||
+    extension < eMin - STOP_TOLERANCE ||
+    extension > eMax + STOP_TOLERANCE ||
+    turn < tMin - STOP_TOLERANCE ||
+    turn > tMax + STOP_TOLERANCE
+  ) {
+    return undefined;
+  }
+  return {
+    extension: Math.min(eMax, Math.max(eMin, extension)),
+    turn: Math.min(tMax, Math.max(tMin, turn)),
+  };
+}
+
+/** The value of `mount/preset/position`: `[EEEETTTT]`; a position outside the protocol ranges throws. */
 export function positionValue(extension, turn) {
-  const e = Math.min(RANGE.extension[1], Math.max(RANGE.extension[0], Math.round(extension)));
-  const t = Math.min(RANGE.turn[1], Math.max(RANGE.turn[0], Math.round(turn)));
+  if (
+    !Number.isInteger(extension) ||
+    !Number.isInteger(turn) ||
+    extension < RANGE.extension[0] ||
+    extension > RANGE.extension[1] ||
+    turn < RANGE.turn[0] ||
+    turn > RANGE.turn[1]
+  ) {
+    throw new Error('position out of range');
+  }
   const bytes = Buffer.alloc(4);
-  bytes.writeUInt16BE(e, 0);
-  bytes.writeInt16BE(t, 2);
+  bytes.writeUInt16BE(extension, 0);
+  bytes.writeInt16BE(turn, 2);
   return `[${bytes.toString('hex')}]`;
 }

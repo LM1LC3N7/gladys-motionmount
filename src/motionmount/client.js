@@ -117,17 +117,24 @@ export class Connection {
     return this.request({ ...options, kind: 'write', key, line });
   }
 
-  request({ kind, key, line, rank = RANK.read, beforeSend, timeout, tag }) {
+  /**
+   * `timeout`: the longest wait for the answer, counted from the write;
+   * `deadline`: a monotonic time the answer must come by, whatever the wait in
+   * the queue (a request whose deadline passed before its turn is not written:
+   * kind `late`). The shorter of the two applies, computed at the write.
+   */
+  request({ kind, key, line, rank = RANK.read, beforeSend, timeout, deadline, tag }) {
     return new Promise((resolve, reject) => {
       if (this.closed) {
         reject(new MotionMountError('closed'));
         return;
       }
-      if (this.queue.length >= LIMITS.queue) {
+      // A stop is never refused for a full queue (stops are few: src/app.js joins them).
+      if (rank !== RANK.stop && this.queue.length >= LIMITS.queue) {
         reject(new MotionMountError('busy'));
         return;
       }
-      const entry = { kind, key, line, rank, beforeSend, timeout, tag, resolve, reject };
+      const entry = { kind, key, line, rank, beforeSend, timeout, deadline, tag, resolve, reject };
       const at = this.queue.findIndex((e) => e.rank > rank);
       this.queue.splice(at === -1 ? this.queue.length : at, 0, entry);
       this.pump();
@@ -141,6 +148,16 @@ export class Connection {
         break;
       }
       const [entry] = this.queue.splice(at, 1);
+      let wait = entry.timeout ?? this.timings.requestTimeout;
+      if (entry.deadline !== undefined) {
+        const left = entry.deadline - this.now();
+        if (left < 50) {
+          // Its turn came too late: nothing written.
+          entry.reject(new MotionMountError('late'));
+          continue;
+        }
+        wait = Math.min(wait, left);
+      }
       try {
         entry.beforeSend?.();
       } catch (err) {
@@ -158,7 +175,7 @@ export class Connection {
             this.close('timeout');
           }
         },
-        Math.max(50, entry.timeout ?? this.timings.requestTimeout),
+        Math.max(50, wait),
       );
       this.socket.write(entry.line);
     }
@@ -238,8 +255,9 @@ export class Connection {
     const parsed = parseLine(line);
     if (parsed.kind === 'code') {
       if (this.inFlight) {
+        // A read is answered with its value: a code (even #202) means it was not.
         this.settle(
-          parsed.code === 202
+          parsed.code === 202 && this.inFlight.kind === 'write'
             ? undefined
             : new MotionMountError('refused', { answered: true, code: parsed.code }),
           true,

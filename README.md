@@ -40,17 +40,26 @@ Gladys ⇄ SDK ⇄ src/handlers.js ⇄ src/app.js (MotionMountApp) ⇄ src/motio
   3.5 s or refused; only in a session whose MAC is the device's and whose PIN
   was accepted (or not needed).
 - **Stop**: the protocol has none; the current position is read and sent back
-  as the target (`mount/preset/position`). Outside the lane and the option,
-  before every request not written yet, holds the connection, waits 1 s at most
-  for the request on the wire (then cuts and reconnects), connects at once when
-  needed, cancels the moves not written yet, checked again 1.5 s later and sent
-  again while the mount moves (3 times at most, never after a newer move).
+  as the target (`mount/preset/position`), only when plausible (within the
+  travel, ±5 brought back to the bound; further: nothing written). Outside the
+  lane and the option, before every request not written yet, holds the
+  connection, waits 1 s at most for the request on the wire (a previous stop
+  included; then cuts and reconnects), each read 1.5 s at most, a new
+  connection and one more try when a read fails before the line, connects at
+  once when needed, cancels the moves not written yet; presses before the line
+  leaves join it. Checked 1.5 s later (answered or not) and sent again while
+  the mount moves or cannot tell, 3 rounds at most, kept when a re-send fails,
+  ended by a move written after it.
 - **Connection**: kept open; read again every interval (60 s); after a failure
-  30 s, 1, 2, 5 min, never sooner than the interval, the last attempt kept in
-  `/data` (a restart never connects sooner).
+  30 s, 1, 2, 5 min and at least the interval; the last attempt kept in
+  `/data`, so a restart (timer and Test button) waits for it too. A stop, its
+  checks and the follow-up reads of a command may connect sooner. A first read
+  that fails closes the connection.
 - **PIN**: sent only when the mount asks for it, once per connection; refused
-  -> final, kept in `/data` as an 8-bit mark only (no hash a brute force over
-  9999 PINs could invert), lifted by another PIN or the Test button (one try).
+  (status not authenticated or a refusal code after it) -> final; two cuts in
+  a row right after it -> held too (a stop still sends it, once per press).
+  Kept in `/data` as an 8-bit mark only (no hash a brute force over 9999 PINs
+  could invert), lifted by another PIN or the Test button (one try).
 
 ## Development
 

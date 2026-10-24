@@ -189,6 +189,7 @@ test('a move for another mount (an address given to another one) is refused', as
   mount.state.mac = OTHER_MAC;
   mount.dropAll();
   await wait(50);
+  app.attemptAt = -Infinity;
   await app.tick({ trial: true });
   const ack = await press(gladys, 'preset', '1', MAC);
   assert.equal(ack.success, false);
@@ -286,6 +287,7 @@ test('a move without answer: "sent, without confirmation", the next move waits',
   const ack = await press(gladys, 'preset', '1');
   assert.equal(ack.success, false);
   assert.match(ack.error, /sans confirmation/);
+  app.attemptAt = -Infinity;
   await app.tick({ trial: true });
   const next = await press(gladys, 'preset', '2');
   assert.equal(next.success, false);
