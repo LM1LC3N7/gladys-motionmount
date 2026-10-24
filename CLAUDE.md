@@ -5,72 +5,70 @@ contributors.
 
 ## What this is
 
-A Gladys Assistant **external integration**: a Node.js service (Node 22+, ESM,
-no build step) that runs in its own sandboxed Docker container and talks to
-Gladys through
-[`@gladysassistant/integration-sdk`](https://github.com/GladysAssistant/integration-sdk-js),
-its only runtime dependency. It started from the official JavaScript template.
+A Gladys Assistant **external integration** for Vogel's MotionMount motorized
+TV mounts: a Node.js service (Node 22+, ESM, no build step) in its own
+sandboxed Docker container, talking to Gladys through
+`@gladysassistant/integration-sdk` (its only runtime dependency) and to the
+mount over its local TCP line protocol (port 23), ported from
+python-MotionMount (MIT, see `THIRD_PARTY_NOTICES.md`).
 
 ## Commands
 
 ```bash
 npm install
-npm test                                  # node --test, the built-in runner
-node --test test/devices.test.js          # one file
-node --test --test-name-pattern "plug"    # tests whose name matches
-npm run lint                              # ESLint
-npm run format:check                      # Prettier, as the CI runs it
-npm run format                            # Prettier, fix in place
-npx github:GladysAssistant/integration-store .   # store admission checks
+npm test                                  # node --test
+node --test test/app.test.js              # one file
+npm run lint
+npm run format:check
+npm run cover                             # cover.png
 ```
-
-The CI (`.github/workflows/ci.yml`) runs `format:check`, `lint` and `test` on
-Node 22 and 24, and builds the Docker image: run the three commands before
-pushing.
 
 ## Architecture
 
 ```
-index.js                          SDK wiring only: handlers registered before connect()
-src/devices/index.js              registry of the device blueprints + dispatch helpers
-src/devices/<type>.js             one device type per file (buildDevice, onPoll, onSetValue...)
-src/scenes.js                     scene action handlers (manifest `scene_actions`)
-src/widgets.js                    dashboard widget handlers (manifest `widgets`)
-src/config.js                     DEFAULT_CONFIG (mirrors the manifest defaults) + normalization
-src/weather.js                    example driver (Open-Meteo)
-gladys-assistant-integration.json manifest: name, config_schema, actions, image...
-docs/en.md, docs/fr.md            user documentation, re-hosted by Gladys (mandatory)
-test/                             node --test, against the SDK's fake Gladys (integration-sdk/testing)
-.github/scripts/release.mjs       release helpers (manifest bump, changelog), tested in test/
+index.js                     SDK wiring only
+src/handlers.js              the SDK handlers (shared with the tests)
+src/app.js                   MotionMountApp: connection, setup, reads, status, commands
+src/motionmount/client.js    one TCP connection: ranked queue, hold, bounds
+src/motionmount/protocol.js  lines, values, error status, position (pure)
+src/devices.js               the Gladys device, external ids (pure)
+src/config.js                normalized configuration (PIN only here)
+src/store.js                 /data: last attempt, identity, PIN refusal mark
+src/publisher.js             states within 300/min
+src/i18n.js                  every text, en + fr
+test/helpers/fakeMount.js    a fake MotionMount on 127.0.0.1
 ```
+
+## Safety rules (a motorized mount can pinch or hit)
+
+- Moves ("go to a preset") stay behind `allow_moves` (off by default), checked
+  on arrival, after the fresh reads and in `beforeSend`. Never a `switch` nor a
+  writable binary: a "turn everything off" must never move the TV.
+- Positions are bounded (`max_extension`, `max_turn`), checked on the preset
+  read just before acting; a move is refused while the mount reports an
+  obstruction, a motor, internal or TV width error.
+- Stop is never behind the option, the lane or a read of anything but the
+  position it sends back; it holds the connection (`RANK.stop`, `hold()`),
+  waits 1 s at most for the request on the wire, connects at once when needed,
+  cancels the moves not written yet. Never put it behind anything.
+- A line that may have left is never told "not sent"; never retried by the
+  integration; the ack never waits for a publication to Gladys.
+- The PIN never reaches a log, /data, a status nor an error; only digits enter
+  its line; refused -> final (8-bit mark only), lifted by another PIN or the
+  Test button.
+- Never connect sooner than the interval except the follow-up reads of a
+  command and a stop; a reconnection to Gladys reads nothing.
+- Docs list the exact refusal cases of a command; no absolute claims.
 
 ## Rules
 
-- **External ids are forever.** Build them with
-  `gladys.externalIds(type, platformId)`, `platformId` being the unique id the
-  platform gives the device (serial, cloud id, MAC), never a label. Gladys keys
-  devices, their history, scenes and dashboards on them: changing one creates a
-  new device and orphans the old one. The same goes for every key users store:
-  manifest `config_schema`, `actions`, widget and scene keys, feature keys.
-- **The container rootfs is read-only.** Write only under `/data`, the one
-  writable volume. Never log tokens, passwords or API keys.
-- **Versions belong to the Release workflow** (Actions → Release). Never edit
-  `version` in `package.json` or in the manifest, nor the `docker_image` tag,
-  by hand — except on the README's hand-pushed tag path, which bumps all three
-  together before tagging. `test/manifest.test.js` checks they agree.
-- **Changelog.** Every user-visible change adds a line under `## [Unreleased]`
-  in `CHANGELOG.md` (`### Added`, `Changed`, `Fixed`, `Removed`, `Security`).
-  Never write a version heading: the Release workflow moves the section, and it
-  becomes the notes of the GitHub Release.
-- **Manifest.** Texts are multi-language objects `{ "en": ..., "fr": ... }`:
-  `label`, `description` and `placeholder` alike, never a plain string. The
-  catalog `description` holds 10 to 100 characters per language. A field the
-  older cores do not know needs a higher `gladys_version` minimum
-  (`categories`: 4.86.0; `widgets`, `scene_triggers`, `scene_actions`,
-  `type: "provider"`: 5.1.0). `test/manifest.test.js` ties the manifest to the
-  code (defaults, action, scene and widget handlers): change both sides
-  together.
-- **User-facing text** is bilingual (English and French): action messages,
-  manifest texts, and `docs/en.md` / `docs/fr.md`, kept in sync.
-- **Style.** Prettier formats, ESLint catches mistakes. Comments explain why,
-  in English. Tests never touch the network.
+- **External ids are forever**: `gladys.externalIds('motionmount', mac)`.
+- **A device published again never loses a feature**.
+- **The container rootfs is read-only**: write only under `/data`.
+- **Versions belong to the Release workflow**; `test/manifest.test.js` checks
+  the four places agree (never a pinned value).
+- **Changelog**: every user-visible change under `## [Unreleased]`.
+- **Manifest** texts are `{ en, fr }`; never write that a secret is encrypted
+  (Gladys keeps it in clear in its database); never a `default` on a secret.
+- **Style**: Prettier, ESLint, comments in English. Tests never leave the
+  loopback. No Bluetooth.

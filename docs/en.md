@@ -1,61 +1,139 @@
-# Demo Devices Template
+# Vogel's MotionMount
 
-This is the user documentation of the integration. Gladys re-hosts this file
-and shows a permanent **Documentation** link to it in the Configuration screen
-(in the user's language, with English as the fallback) — it is when
-configuring that the user needs it most. Keep the short onboarding hints in
-the `section` blocks of the manifest `config_schema`; put the long
-step-by-step (screenshots, troubleshooting…) here.
+This integration connects Gladys to **your Vogel's MotionMount motorized TV
+mount** (Signature, TVM 7675 Pro) over its **local protocol** (TCP, port 23, on
+the Ethernet cable of the mount). The MotionMount becomes a device in the
+**Discovery** tab of Gladys: position, motion, errors, a list to go to a preset
+and a **Stop** button. Everything stays on your local network. Unofficial, not
+affiliated with Vogel's.
+
+> **Development version (0.1).** Written from the python-MotionMount library
+> published by Vogel's, and tested against a simulated MotionMount only: it has
+> **never been tested with a real MotionMount** yet. Feedback is welcome on the
+> GitHub repository.
+
+## Safety first
+
+A motorized mount can **pinch** a hand between the TV and the wall, or **hit**
+a person, a piece of furniture or an object. That is why:
+
+- **moves are off by default**: tick "Allow moves" first;
+- a move goes through a **list** ("Go to a preset"), never a switch: a "turn
+  everything off" scene or voice assistant does not trigger it;
+- a preset beyond the **bounds** you choose (extension, turn) is refused;
+- a move is refused while the mount reports an **obstruction**, a motor error,
+  an internal error or a TV width error;
+- the **Stop** button does not depend on the moves option.
+
+The protections of the mount itself (obstruction detection) come first: only
+automate a move when nobody can stand in its way.
 
 ## What you get
 
-Six demo devices show up after installation: a weather station (real data
-from Open-Meteo), a switch, a dimmable light, a smart plug with power
-metering, a motion sensor and a camera.
+| Feature        | In Gladys                                                         |
+| -------------- | ----------------------------------------------------------------- |
+| Extension (%)  | 0 = against the wall, 100 = arm fully out (read only)             |
+| Turn (%)       | -100 to 100 (read only)                                           |
+| Moving         | the motors run (read only)                                        |
+| Status         | "OK" or the errors the mount reports (read only)                  |
+| Go to a preset | the wall, or a preset 1 to 7 set on the mount; **off by default** |
+| Stop           | stops the mount where it is                                       |
 
-## Configuration
+Positions are those of the mount (percent of its travel), not centimetres nor
+degrees. Presets are set in the Vogel's app; the list follows their names at
+each read.
 
-1. Open the **Configuration** tab of the integration.
-2. Set the **latitude** and **longitude** the demo weather station should
-   observe (they default to Paris), and pick your temperature unit.
-   The **refresh interval** sets how often the weather station and the
-   plug's power are read: every 5 minutes by default, every minute at most.
-3. Save: the devices appear in the **Discovery** tab, ready to be added.
+## Requirements
 
-The **Prefer the local connection** toggle drives the demo plug: it reports
-the channel it actually uses as a badge (local or cloud), with an orange dot
-when it runs degraded (local refused, cloud fallback).
+- A MotionMount Signature (TVM 7675 Pro) wired with an **Ethernet cable** to
+  the network of Gladys (the RS-232 link is not supported).
+- Its IP address, preferably fixed (reserved in your router). Names in
+  `.local` do not resolve in the integration container.
+- If a **PIN of the User level** is set on the mount: that PIN.
+- A firmware that gives the MAC address of the mount (`mac`): it is the
+  identity of the device in Gladys. An older mount without it is not added (the
+  status says so).
 
-## Actions
+## Setup
 
-- **Test the weather provider** — performs a live request to Open-Meteo and
-  shows the current temperature and humidity under the button.
-- **Identify a device** — pick one of your devices in the list and it will
-  signal itself (the demo light "blinks" in the logs).
+1. In Gladys, open the **Vogel's MotionMount** integration, **Configuration**
+   tab.
+2. Type the **address** of the MotionMount, like `192.168.1.50` (or
+   `192.168.1.50:2323` for another port).
+3. Only when the mount has a PIN: type it in **PIN**. It is kept by Gladys in
+   its database, never shown again; it is sent only to the MotionMount, and only
+   when the mount asks for it, once per connection.
+4. Save, then click **Test the connection**: the state of the mount shows.
+5. Open the **Discovery** tab and add the MotionMount.
+6. To control the moves, tick **Allow moves** and set the bounds.
 
-## Scenes
+## Options
 
-The integration adds its own cards to the scene editor (Gladys 5.1 or
-later), under the **Integrations** category:
+- **Allow moves** (off by default): "Go to a preset" moves the TV.
+- **Maximum extension** (100 % by default) and **Maximum turn** (100 % by
+  default, each side): a preset beyond them is refused. The wall (extension 0,
+  turn 0) is always within them.
+- **Read interval** (60 s by default, 30 to 600 s): how often the state is read
+  again. The mount also tells its changes on the connection, which stays open.
+  After a command, the state is read at 2, 8, 20 and 45 s.
+- **Language of the feature names**.
 
-- **Motion detected** (trigger) — starts the scene when a demo motion sensor
-  sees something move. Optionally pick the sensor and what moved (person,
-  animal); left empty, any detection matches. The following actions can
-  read what moved with `{{triggerEvent.data.target}}`.
-- **Identify a device** (action) — makes the chosen device signal itself.
-  It returns whether the device could signal itself, so the following
-  actions can depend on it.
+## How the commands are handled
 
-## Dashboard
+**Go to a preset**: right before acting, the integration reads the errors of
+the mount and the preset asked (set? within the bounds?), then sends the
+command. It is refused, nothing sent, when:
 
-Add the **Demo status** widget to a dashboard: it shows the live
-temperature of the weather station and the power of the office plug, the
-connection the plug currently uses (orange when degraded) and the observed
-location. Its **Identify the light** button makes the demo light signal
-itself.
+- the moves option is off (checked on arrival, after the reads and right
+  before sending);
+- the mount is not connected, or its identity (MAC address) is not the one of
+  the device (its IP address was given to another one);
+- the mount asks for a PIN that is missing, refused, or asks to wait after
+  failed attempts;
+- the preset is not set, or is beyond the bounds;
+- the mount reports an error (obstruction, motor, internal, width);
+- a stop arrived meanwhile;
+- the previous move left without confirmation less than 30 s ago and the
+  mount has not reached it yet;
+- the command could not leave within 3.5 s.
+
+One move at a time: the next one waits until the previous one is sent. A
+command that left without an answer of the mount is reported "sent, without
+confirmation", and never sent again by itself.
+
+**Stop**: the MotionMount protocol has no stop command. The integration reads
+the current position and sends it back as the new target: the motors stop
+where they are (give or take the rounding). The stop cancels the moves not sent
+yet, goes before every other request, and waits 1 s at most for the request on
+the wire (then the connection is cut and opened again). When the mount is not
+connected, the stop opens a connection at once (one try), even during the wait
+after a failure. 1.5 s later, when the mount still says it moves, the stop is
+sent again (3 times at most), unless a move was sent after it. The cases where
+the stop fails:
+
+- no address is configured, or the mount does not answer (no connection in
+  time);
+- the current position cannot be read;
+- the mount asks for a PIN that is not typed, or was already refused (it is
+  not sent again), or asks to wait: the mount then refuses the stop;
+- the stop could not leave within 3.5 s.
+
+## Privacy and security
+
+- The PIN never shows in the logs, the connection status nor in `/data`. When
+  the mount refuses it, only an **8-bit mark** (a truncated salted hash, shared
+  by about 39 PINs out of 9999) is kept in `/data`, to see that the PIN typed
+  changed: the refusal is final until another PIN or a click on **Test the
+  connection** (one try).
+- The MotionMount protocol travels in clear on your local network.
+- No cloud, no account, no Bluetooth.
 
 ## Troubleshooting
 
-The integration logs everything it does: check the integration logs from the
-Gladys UI (or `docker logs` on the host) with `LOG_LEVEL=debug` for the full
-detail.
+- **Unreachable**: check the IP address and the Ethernet cable; the mount
+  answers on port 23. After a failure, the integration tries again after 30 s,
+  1, 2 then 5 min, never sooner than the interval.
+- **Identity cannot be read**: firmware too old (no MAC address); update the
+  mount with the Vogel's app.
+- **Preset not reached** (orange dot): an obstruction, a hand on the TV or a
+  stop interrupted the travel.

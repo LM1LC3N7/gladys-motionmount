@@ -1,45 +1,137 @@
 // -----------------------------------------------------------------------------
-// Integration configuration.
-//
-// The configuration is filled in by the user in Gladys, from the `config_schema`
-// declared in `gladys-assistant-integration.json`. The SDK fetches it for you
-// (`gladys.getConfig()`) and notifies you of every change through
-// `gladys.onConfigUpdated()`.
-//
-// This module only provides defaults and normalizes the received object, so the
-// rest of the code never has to deal with `undefined`.
+// The configuration: the manifest `config_schema` values, normalized so the
+// rest of the code never deals with strings typed in a form. The PIN is kept
+// here only: never logged, never in /data (only a marker of a PIN the mount
+// REFUSED, 8 bits of a salted hash, see src/store.js), never in a status or an
+// error; an invalid one is never shown back (it may be a pasted secret).
 // -----------------------------------------------------------------------------
 
-// Defaults: they MUST stay consistent with the `default` values declared in the
-// `config_schema` of the manifest.
+import { DEFAULT_PORT, MAX_EXTENSION, MAX_TURN, POLL_INTERVAL } from './constants.js';
+
+/** Defaults, mirrored by the manifest (checked by test/manifest.test.js). */
 export const DEFAULT_CONFIG = {
-  latitude: 48.8566, // Paris
-  longitude: 2.3522,
-  unit: 'celsius', // 'celsius' | 'fahrenheit'
-  // Seconds between two reads of the polled sensors. Gladys polls at most once
-  // a minute: slower intervals are applied by skipping polls (see
-  // createPoller in src/devices/index.js).
-  poll_frequency: 300,
-  // Reserved key (NOT in config_schema): because the manifest declares both
-  // 'local' and 'cloud' in its `transports` field, Gladys shows a standard
-  // "Prefer the local connection" toggle and sends the user's choice here.
-  // Read-only for the integration; defaults to true.
-  GLADYS_PREFER_LOCAL: true,
+  host: '',
+  poll_interval: POLL_INTERVAL.default,
+  allow_moves: false,
+  max_extension: MAX_EXTENSION.default,
+  max_turn: MAX_TURN.default,
+  language: 'fr',
+};
+
+/** The optional fields without a default in the manifest (the PIN is a secret). */
+const OPTIONAL = { pin: '' };
+
+const LABEL = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/i;
+const IPV4 = /^(25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)(\.(25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)){3}$/;
+
+/**
+ * The address typed by the user: an IPv4 address or a host name, with an
+ * optional port (23 by default). Credentials ("user:pass@host") are refused and
+ * never shown; names in .local are refused (mDNS does not resolve in the
+ * container).
+ * @returns {{ address?: { host: string, port: number }, invalid?: string, credentials?: boolean, local?: boolean }}
+ */
+export function parseHost(raw) {
+  let text = String(raw ?? '').trim();
+  if (text === '') {
+    return {};
+  }
+  if (text.includes('@')) {
+    return { credentials: true };
+  }
+  if (text.length > 260) {
+    return { invalid: `${text.slice(0, 40)}…` };
+  }
+  const shown = text.slice(0, 60);
+  text = text.replace(/^(?:tcp|telnet):\/\//i, '').replace(/\/.*$/, '');
+  const match = /^([^:]+)(?::(\d{1,5}))?$/.exec(text.toLowerCase());
+  if (!match) {
+    return { invalid: shown };
+  }
+  const [, host, portText] = match;
+  const port = portText === undefined ? DEFAULT_PORT : Number(portText);
+  if (port < 1 || port > 65535 || host.length > 253) {
+    return { invalid: shown };
+  }
+  if (/\.local\.?$/.test(host)) {
+    return { local: true, invalid: shown };
+  }
+  const valid =
+    IPV4.test(host) || (!/^[\d.]+$/.test(host) && host.split('.').every((l) => LABEL.test(l)));
+  return valid ? { address: { host, port } } : { invalid: shown };
+}
+
+/** `host` or `host:port` (port 23 left out): the address in /data and in the statuses. */
+export const addressKey = (address) =>
+  address ? (address.port === DEFAULT_PORT ? address.host : `${address.host}:${address.port}`) : '';
+
+/** Only `true` (or the text "true") allows: anything else, missing included, refuses. */
+const strictTrue = (value) => value === true || value === 'true';
+
+/** A number typed in the form: a finite number, or undefined ('' and null are not 0). */
+export function numberOf(value) {
+  if (typeof value === 'number') {
+    return Number.isFinite(value) ? value : undefined;
+  }
+  if (typeof value === 'string' && /^\s*-?\d{1,6}(\.\d{1,6})?\s*$/.test(value)) {
+    return Number(value);
+  }
+  return undefined;
+}
+
+const bounded = (value, { default: fallback, min, max }) => {
+  const number = numberOf(value);
+  return number === undefined ? fallback : Math.min(max, Math.max(min, Math.round(number)));
 };
 
 /**
- * Merge the user config with the defaults.
- * @param {Record<string, unknown>} raw config returned by the SDK
+ * The PIN of the "User" level of the mount: 1 to 4 digits, 1 to 9999
+ * (python-MotionMount `authenticate`). Only digits: nothing else can enter the
+ * line it is written in.
+ * @returns {{ pin: string, invalid: boolean }} `pin` '' when none (or invalid)
+ */
+export function pinOf(value) {
+  const text =
+    typeof value === 'number' ? String(value) : typeof value === 'string' ? value.trim() : '';
+  if (text === '') {
+    return { pin: '', invalid: false };
+  }
+  if (!/^\d{1,4}$/.test(text) || Number(text) < 1) {
+    return { pin: '', invalid: true };
+  }
+  return { pin: String(Number(text)), invalid: false };
+}
+
+/**
+ * @returns {{ address?: { host: string, port: number }, key: string, invalid?: string,
+ *   local: boolean, credentialsInHost: boolean, pin: string, pinInvalid: boolean,
+ *   pollInterval: number, allowMoves: boolean, maxExtension: number, maxTurn: number,
+ *   language: 'fr'|'en' }}
  */
 export function normalizeConfig(raw = {}) {
+  const c = { ...DEFAULT_CONFIG, ...OPTIONAL };
+  for (const [key, value] of Object.entries(raw ?? {})) {
+    if (Object.hasOwn(c, key) && value != null) {
+      c[key] = value;
+    }
+  }
+  const parsed = parseHost(typeof c.host === 'string' ? c.host : '');
+  const { pin, invalid: pinInvalid } = pinOf(c.pin);
   return {
-    ...DEFAULT_CONFIG,
-    ...raw,
-    // Force the types: config may arrive as strings from a form.
-    latitude: Number(raw.latitude ?? DEFAULT_CONFIG.latitude),
-    longitude: Number(raw.longitude ?? DEFAULT_CONFIG.longitude),
-    poll_frequency: Number(raw.poll_frequency ?? DEFAULT_CONFIG.poll_frequency),
-    // The preference is a boolean; anything but an explicit false means true.
-    GLADYS_PREFER_LOCAL: raw.GLADYS_PREFER_LOCAL !== false,
+    address: parsed.address,
+    key: addressKey(parsed.address),
+    invalid: parsed.invalid,
+    local: Boolean(parsed.local),
+    credentialsInHost: Boolean(parsed.credentials),
+    pin,
+    pinInvalid,
+    pollInterval: bounded(c.poll_interval, POLL_INTERVAL),
+    allowMoves: strictTrue(c.allow_moves),
+    maxExtension: bounded(c.max_extension, MAX_EXTENSION),
+    maxTurn: bounded(c.max_turn, MAX_TURN),
+    language: c.language === 'en' ? 'en' : 'fr',
   };
 }
+
+/** What the connection depends on: a change starts it over (compared in memory only). */
+export const connectionKey = (config) => JSON.stringify([config.key, config.pin]);
